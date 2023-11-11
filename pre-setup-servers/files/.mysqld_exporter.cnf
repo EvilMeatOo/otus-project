@@ -1,0 +1,5 @@
+# Add correct username and password for user create
+
+[client]
+user=mysqld_exporter
+password=

@@ -1,0 +1,13 @@
+[Unit]
+Description=Node Exporter
+After=network.target
+
+[Service]
+User=nodeusr
+Group=nodeusr
+Type=simple
+ExecStart=/usr/local/bin/node_exporter\
+  --collector.filesystem.ignored-mount-points=^/(sys|proc|dev|run)($|/)
+
+[Install]
+WantedBy=multi-user.target

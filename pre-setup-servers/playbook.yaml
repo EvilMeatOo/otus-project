@@ -1,0 +1,936 @@
+---
+- name: Setting up the otus's servers
+  hosts: otus
+
+  tasks:
+    # ------------------------------------------------------------------------------------
+    # SSH: creating directory
+    # and uploading ssh keys
+    # ------------------------------------------------------------------------------------
+    - name: Creating .ssh directory in /root/
+      file:
+        path: /root/.ssh
+        state: directory
+        mode: 0700
+      tags: ssh
+
+    - name: Copying the ssh root keys in /root/.ssh/authorized_keys
+      copy:
+        src: files/authorized_keys
+        dest: /root/.ssh/
+        mode: 0600
+        owner: root
+        group: root
+      tags: ssh
+
+    - name: Copying the sshd_config in /etc/ssh/sshd_config
+      copy:
+        src: files/sshd_config
+        dest: /etc/ssh/sshd_config
+        mode: 0644
+        owner: root
+        group: root
+      notify: restart_sshd
+      tags: ssh
+
+    # ------------------------------------------------------------------------------------
+    # Selinux manipulations
+    # ------------------------------------------------------------------------------------
+    - name: SELinux via copy config file in /etc/selinux/config
+      copy:
+        src: files/selinux_config
+        dest: /etc/selinux/config
+      tags: selinux
+
+    # Install: ansible-galaxy collection install ansible.posix
+    - name: Switching on selinux policy using module (ansible.posix.selinux)
+      ansible.posix.selinux:
+        policy: targeted
+        state: enforcing
+      tags: selinux
+    # ------------------------------------------------------------------------------------
+    # Network configuration
+    # ------------------------------------------------------------------------------------
+    #
+    - name: Setting up the /etc/resolv.conf file
+      copy:
+        content: |
+          search 
+          nameserver 127.0.0.1
+          nameserver 1.1.1.1
+          nameserver 1.0.0.1
+          options timeout:1
+        dest: /etc/resolv.conf
+      tags: net
+
+    - name: Pre-setting ntp
+      shell: "timedatectl set-ntp true"
+      async: 60
+      poll: 0
+      ignore_errors: yes
+
+    - name: Restarting chronyd
+      shell: "systemctl restart chronyd"
+      async: 60
+      poll: 0
+      ignore_errors: yes
+
+    # ------------------------------------------------------------------------------------
+    # Package installation and erasing
+    # ------------------------------------------------------------------------------------\
+
+    - name: Removing firewalld package from the system
+      yum:
+        name:
+          - firewalld
+        state: absent
+      tags: packages
+
+    - name: Installing some packages
+      yum:
+        name:
+          - vim
+          - atop
+          - htop
+          - bash-completion
+          - ethtool
+          - teamd
+          - net-tools
+          - util-linux-ng
+          - linux-firmware
+          - policycoreutils-python
+        state: latest
+        disable_gpg_check: true
+      tags: packages
+
+    # ------------------------------------------------------------------------------------
+
+    - name: Change SSH prot to SELinux
+      shell: "semanage port -a -t ssh_port_t -p tcp 2200"
+      async: 60
+      poll: 0
+      tags: ssh
+
+    - name: Pause 10 seconds
+      ansible.builtin.pause:
+       seconds: 10 
+      tags: ssh
+
+    # ------------------------------------------------------------------------------------
+    # Repos
+    # ------------------------------------------------------------------------------------
+    - name: Copying all repos in /etc/yum.repos.d
+      copy:
+        src: files/yum.repos.d
+        dest: /etc/
+        mode: 0755
+      when: ansible_hostname == "backend"
+      notify: yum_clean_all
+      tags: repos
+
+    # ------------------------------------------------------------------------------------
+    # setting up monitoring for a product service
+    # ------------------------------------------------------------------------------------
+    - name: Add group and user for node_exporter
+      shell: "useradd -rs /bin/false nodeusr"
+      tags: service_monitoring
+
+    - name: Downloading node_exporter
+      shell: "wget -P /tmp http://192.168.56.201/node_exporter-1.6.1.linux-amd64.tar.gz"
+      tags: service_monitoring
+
+    - name: Extracting node_exporter
+      shell: "tar -xf /tmp/node_exporter-1.6.1.linux-amd64.tar.gz -C /tmp/"
+      tags: service_monitoring
+
+    - name: Moving node_exporter 
+      shell: "mv /tmp/node_exporter-1.6.1.linux-amd64/node_exporter /usr/local/bin/"
+      tags: service_monitoring
+
+    - name: Copying node_exporter.service for monitoring
+      copy:
+        src: files/node_exporter.service
+        dest: /etc/systemd/system/
+        mode: 0755
+      tags: service_monitoring
+
+    - name: Removing prometheus garbage
+      shell: "rm -fr /tmp/node_exporter-1.6.1.linux-amd64*"
+      tags: service_monitoring
+
+    - name: start and enable prometheus service
+      service:
+        name: node_exporter
+        state: started
+        enabled: yes
+        daemon_reload: true
+      tags: service_monitoring
+
+    - name: Downloading and insatll filebeat
+      shell: "yum install -y --nogpgcheck http://192.168.56.201/filebeat-8.9.1-x86_64.rpm"
+      tags: service_monitoring
+
+    - name: Copying filebeat file in /etc/filebeat
+      copy:
+        src: files/filebeat.yml
+        dest: /etc/filebeat/
+        mode: 0600
+      tags: service_monitoring
+
+    - name: start and enable filebeat service
+      service:
+        name: filebeat
+        state: started
+        enabled: yes
+        daemon_reload: true
+      tags: service_monitoring
+
+    - name: Add group and user for mysqld_exporter
+      shell: "groupadd --system prometheus; useradd -s /sbin/nologin --system -g prometheus prometheus"
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: Downloading mysqld_exporter
+      shell: "wget -P /tmp http://192.168.56.201/mysqld_exporter-0.15.0.linux-amd64.tar.gz"
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: Extracting mysqld_exporter
+      shell: "tar -xf /tmp/mysqld_exporter-0.15.0.linux-amd64.tar.gz -C /tmp/"
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: Moving mysqld_exporter 
+      shell: "mv /tmp/mysqld_exporter-0.15.0.linux-amd64/mysqld_exporter /usr/local/bin/; chmod +x /usr/local/bin/mysqld_exporter"
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: Copying mysqld_exporter.cnf for monitoring
+      copy:
+        src: files/.mysqld_exporter.cnf
+        dest: /etc/
+        mode: 0755
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: Copying mysqld_exporter.service for monitoring
+      copy:
+        src: files/mysql_exporter.service
+        dest: /etc/systemd/system/
+        mode: 0755
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: Removing mysqld_exporter garbage
+      shell: "rm -fr /tmp/mysqld_exporter-0.15.0.linux-amd64*"
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    - name: start and enable mysqld_exporter service
+      service:
+        name: mysql_exporter
+        state: started
+        enabled: yes
+        daemon_reload: true
+      when: ansible_hostname == "database"
+      tags: service_monitoring
+
+    # ------------------------------------------------------------------------------------
+    # setting up a product service on frontend
+    # ------------------------------------------------------------------------------------
+
+    - name: Installing packages for frontend
+      yum:
+        name:
+          - nginx
+          - iptables-services
+        state: latest
+        disable_gpg_check: true
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Permissive SELinux for httpd_t
+      shell: "semanage permissive -a httpd_t"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Copying nginx file in /etc/nginx for frontend
+      copy:
+        src: files/nginx.conf
+        dest: /etc/nginx
+        mode: 0644
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Copying nginx-frontend file in /etc/nginx/conf.d
+      copy:
+        src: files/frontend.conf
+        dest: /etc/nginx/conf.d
+        mode: 0644
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Copying ssl certificate for frontend
+      copy:
+        src: files/ssl
+        dest: /etc/ssl/certs
+        mode: 0644
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Creating nginx cache dir
+      shell: "mkdir -p /var/lib/nginx/cache/frontend-b1e13442"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Changing group for cache dir
+      shell: "chown -R root:nginx /var/lib/nginx/cache"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Start and enable nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Start and enable iptables
+      service:
+        name: iptables
+        state: started
+        enabled: yes
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Copying the iptables config in /etc/sysconfig/iptables
+      copy:
+        src: files/iptables.front
+        dest: /etc/sysconfig/iptables
+      when: ansible_hostname == "frontend"
+      tags: service
+    
+    - name: Copying the sysctl config in /etc/sysctl.conf
+      copy:
+        src: files/sysctl.conf
+        dest: /etc/sysctl.conf
+      when: ansible_hostname == "frontend"
+      tags: service 
+    
+    - name: Change sysctl
+      shell: "sysctl -p"
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    - name: Change iptables rules
+      shell: "iptables-restore < /etc/sysconfig/iptables"
+      when: ansible_hostname == "frontend"
+      tags: service
+
+    # ------------------------------------------------------------------------------------
+    # setting up a product service on backend
+    # ------------------------------------------------------------------------------------
+
+    - name: Installing packages for backend
+      yum:
+        name:
+          - rsync
+          - nginx
+          - php-cli
+          - php-fpm 
+          - php-mysql
+          - php-json
+          - php-opcache
+          - php-mbstring
+          - php-xml
+          - php-gd
+          - php-curl
+        state: latest
+        disable_gpg_check: true
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: start and enable rsyncd service on backend
+      service:
+        name: rsyncd
+        state: started
+        enabled: yes
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Permissive SELinux for httpd_t
+      shell: "semanage permissive -a httpd_t"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Full_access SELinux for rsync on backend
+      shell: "setsebool -P rsync_full_access on"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Copying the php config in /etc/php-fpm.d/www.conf
+      copy:
+        src: files/www.conf
+        dest: /etc/php-fpm.d/www.conf
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: start and enable php-fpm service
+      service:
+        name: php-fpm
+        state: started
+        enabled: yes
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Changing group for php lib
+      shell: "chown -R root:nginx /var/lib/php"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Creating html and backup directory
+      shell: "mkdir -p /var/www/html/wp; mkdir -p /root/backup/wp"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Downloading WP
+      shell: "wget -P /tmp https://wordpress.org/latest.tar.gz"
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Extracting Wp
+      shell: "tar -xzf /tmp/latest.tar.gz -C /tmp/"
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Moving WP to work directory
+      shell: "mv /tmp/wordpress/* /var/www/html/wp/"
+      when: ansible_hostname == "backend"
+      tags: service
+   
+    - name: Removing WP garbage
+      shell: "rm -fr /tmp/wordpress; rm -fr /tmp/latest.tar.gz"
+      when: ansible_hostname == "backend"
+      tags: service
+    
+    - name: Changing group for wp directory
+      shell: "chown -R nginx: /var/www/html/wp"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Copying nginx-backend file in /etc/nginx/conf.d
+      copy:
+        src: files/wp-backend.conf
+        dest: /etc/nginx/conf.d
+        mode: 0644
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Copying nginx file in /etc/nginx for backend
+      copy:
+        src: files/nginx.conf
+        dest: /etc/nginx
+        mode: 0644
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Copying private key file in .ssh/id_rsa for backend
+      copy:
+        src: files/id_rsa
+        dest: .ssh/
+        mode: 0400
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Copying backup script file in /usr/local/bin/ for backend
+      copy:
+        src: files/cron_wp_backup.sh
+        dest: /usr/local/bin/
+        mode: 0755
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: Add backup task to cron for backend
+      shell: "echo '*/30 * * * * root bash /usr/local/bin/cron_wp_backup.sh' >> /etc/crontab"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backend"
+      tags: service
+
+    - name: start and enable nginx service
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+      when: ansible_hostname == "backend"
+      tags: service
+
+    # ------------------------------------------------------------------------------------
+    # setting up a product service on database
+    # ------------------------------------------------------------------------------------
+
+    - name: Installing packages for database
+      yum:
+        name:
+          - mariadb-server
+          - MySQL-python
+          - rsync
+        state: latest
+        disable_gpg_check: true
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: start and enable rsyncd service on database
+      service:
+        name: rsyncd
+        state: started
+        enabled: yes
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Full_access SELinux for rsync on backend
+      shell: "setsebool -P rsync_full_access on"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "database"
+      tags: service
+    
+    - name: start and enable mysql service
+      service:
+        name: mariadb
+        state: started
+        enabled: yes
+      when: ansible_hostname == "database"
+      tags: service
+    
+    - name: Creating mysql user
+      mysql_user:
+        name: "{{db_user}}"
+        password: "{{db_pass}}"
+        priv: '*.*:ALL'
+        host: '%'
+        state: present
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Creating mysqld_exporter user
+      mysql_user:
+        name: "{{exporter_user}}"
+        password: "{{exporter_pass}}"
+        priv: '*.*:ALL'
+        host: 'localhost'
+        state: present
+      when: ansible_hostname == "database"
+      tags: service
+    
+    - name: Creating db
+      mysql_db:
+        name: "{{db_name}}"
+        state: present
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Enable remote login to mysql
+      lineinfile:
+         path: /etc/my.cnf
+         regexp: '^bind-address'
+         line: 'bind-address = 0.0.0.0'
+         backup: yes
+      notify:
+        - Restart mysql
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Copying private key file in .ssh/id_rsa for database
+      copy:
+        src: files/id_rsa
+        dest: .ssh/
+        mode: 0400
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Copying backup script file in /usr/local/bin/ for database
+      copy:
+        src: files/cron_mysql_backup.sh
+        dest: /usr/local/bin/
+        mode: 0755
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Add backup task to cron for database
+      shell: "echo '*/30 * * * * root bash /usr/local/bin/cron_mysql_backup.sh' >> /etc/crontab"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "database"
+      tags: service
+
+    - name: Add backup directory for database
+      shell: "mkdir -p /root/backup/mysql"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "database"
+      tags: service
+
+    # ------------------------------------------------------------------------------------
+    # setting up a product service on backup
+    # ------------------------------------------------------------------------------------
+ 
+    - name: Add backup directory for backup
+      shell: "mkdir -p /root/backup/mysql; mkdir -p /root/backup/wp; mkdir -p /root/backup/grafana"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "backup"
+      tags: service
+
+
+    # ------------------------------------------------------------------------------------
+    # setting up a product service on monitoring
+    # ------------------------------------------------------------------------------------
+
+    - name: Installing packages for monitoring
+      yum:
+        name:
+          - rsync
+        disable_gpg_check: true
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: start and enable rsyncd service on monitoring
+      service:
+        name: rsyncd
+        state: started
+        enabled: yes
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying private key file in .ssh/id_rsa for monitoring
+      copy:
+        src: files/id_rsa
+        dest: .ssh/
+        mode: 0400
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Downloading and insatll grafana
+      shell: "yum install -y --nogpgcheck http://192.168.56.201/grafana-enterprise-10.2.0-1.x86_64.rpm"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: start and enable grafana-server service
+      service:
+        name: grafana-server
+        state: started
+        enabled: yes
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Add backup directory for grafana
+      shell: "mkdir -p /root/backup/grafana"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying backup script file in /usr/local/bin/ for grafana
+      copy:
+        src: files/cron_grafana_backup.sh
+        dest: /usr/local/bin/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Add backup task to cron for grafana
+      shell: "echo '*/30 * * * * root bash /usr/local/bin/cron_grafana_backup.sh' >> /etc/crontab"
+      async: 60
+      poll: 0
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Add group and user for prometheus
+      shell: "groupadd --system prometheus; useradd -s /sbin/nologin --system -g prometheus prometheus; mkdir /var/lib/prometheus; for i in rules rules.d files_sd; do sudo mkdir -p /etc/prometheus/${i}; done"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Downloading prometheus
+      shell: "wget -P /tmp http://192.168.56.201/prometheus-2.47.2.linux-amd64.tar.gz"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Extracting prometheus
+      shell: "tar -xf /tmp/prometheus-2.47.2.linux-amd64.tar.gz -C /tmp/"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Moving prometheus
+      shell: "mv /tmp/prometheus-2.47.2.linux-amd64/prometheus /usr/local/bin/; mv /tmp/prometheus-2.47.2.linux-amd64/promtool /usr/local/bin/; mv /tmp/prometheus-2.47.2.linux-amd64/console* /etc/prometheus/"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying prometheus config for monitoring
+      copy:
+        src: files/prometheus.yml
+        dest: /etc/prometheus/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying all repos in /etc/yum.repos.d
+      copy:
+        src: files/rules
+        dest: /etc/prometheus/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Rights for prometheus
+      shell: "for i in rules rules.d files_sd; do sudo chown -R prometheus:prometheus /etc/prometheus/${i}; done; for i in rules rules.d files_sd; do sudo chmod -R 775 /etc/prometheus/${i}; done; chown -R prometheus:prometheus /var/lib/prometheus/"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying prometheus.service for monitoring
+      copy:
+        src: files/prometheus.service
+        dest: /etc/systemd/system/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Removing prometheus garbage
+      shell: "rm -fr /tmp/prometheus-2.47.2.linux-amd64*"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: start and enable prometheus service
+      service:
+        name: prometheus
+        state: started
+        enabled: yes
+        daemon_reload: true
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Add group and user for alertmanager
+      shell: "useradd -M -s /bin/false alertmanager; mkdir /etc/alertmanager /var/lib/prometheus/alertmanager"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Downloading alertmanager
+      shell: "wget -P /tmp http://192.168.56.201/alertmanager-0.26.0.linux-amd64.tar.gz"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Extracting alertmanager
+      shell: "tar -xf /tmp/alertmanager-0.26.0.linux-amd64.tar.gz -C /tmp/"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Moving alertmanager 
+      shell: "mv /tmp/alertmanager-0.26.0.linux-amd64/amtool /usr/local/bin/; mv /tmp/alertmanager-0.26.0.linux-amd64/alertmanager /usr/local/bin/"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying alertmanager config for monitoring
+      copy:
+        src: files/alertmanager.yml
+        dest: /etc/alertmanager/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Rights for alertmanager
+      shell: "chown -R alertmanager:alertmanager /etc/alertmanager /var/lib/prometheus/alertmanager; chown alertmanager:alertmanager /usr/local/bin/{alertmanager,amtool}"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Copying alertmanager.service for monitoring
+      copy:
+        src: files/alertmanager.service
+        dest: /etc/systemd/system/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: Removing alertmanager garbage
+      shell: "rm -fr /tmp/alertmanager-0.26.0.linux-amd64*"
+      when: ansible_hostname == "monitoring"
+      tags: service
+
+    - name: start and enable alertmanager service
+      service:
+        name: alertmanager
+        state: started
+        enabled: yes
+        daemon_reload: true
+      when: ansible_hostname == "monitoring"
+      tags: service
+    # ------------------------------------------------------------------------------------
+    # setting up a product service on elk
+    # ------------------------------------------------------------------------------------
+  
+    - name: Installing packages for elk
+      yum:
+        name:
+          - java-11-openjdk
+        state: latest
+        disable_gpg_check: true
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: Disable SELinux for elk
+      shell: "setenforce 0"
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: Downloading and insatll elasticsearch
+      shell: "yum install -y --nogpgcheck http://192.168.56.201/elasticsearch-8.9.1-x86_64.rpm"
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: Copying elasticsearch file in /etc/elasticsearch for elk
+      copy:
+        src: files/elasticsearch.yml
+        dest: /etc/elasticsearch/
+        mode: 0660
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: start and enable elasticsearch service
+      service:
+        name: elasticsearch
+        state: started
+        enabled: yes
+        daemon_reload: true
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: Downloading and insatll kibana
+      shell: "yum install -y --nogpgcheck http://192.168.56.201/kibana-8.9.1-x86_64.rpm"
+      when: ansible_hostname == "elk"
+      tags: service
+      
+    - name: Copying kibana file in /etc/nginx for elk
+      copy:
+        src: files/kibana.yml
+        dest: /etc/kibana/
+        mode: 0660
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: start and enable kibana service
+      service:
+        name: kibana
+        state: started
+        enabled: yes
+        daemon_reload: true
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: Downloading and insatll logstash
+      shell: "yum install -y --nogpgcheck http://192.168.56.201/logstash-8.9.1-x86_64.rpm"
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: Copying all config files in /etc/logstash
+      copy:
+        src: files/conf.d
+        dest: /etc/logstash/
+        mode: 0644
+      when: ansible_hostname == "elk"
+      tags: service
+
+    - name: start and enable logstash service
+      service:
+        name: logstash
+        state: started
+        enabled: yes
+        daemon_reload: true
+      when: ansible_hostname == "elk"
+      tags: service
+  
+  
+    # ------------------------------------------------------------------------------------
+    # restore
+    # ------------------------------------------------------------------------------------
+
+    - name: Copying restore script file in /usr/local/bin/ for backend
+      copy:
+        src: files/cron_wp_restore.sh
+        dest: /usr/local/bin/
+        mode: 0755
+      when: ansible_hostname == "backend"
+      tags: restore
+
+    - name: Restoring WP for backend
+      shell: "bash /usr/local/bin/cron_wp_restore.sh"
+      when: ansible_hostname == "backend"
+      tags: restore
+
+    - name: Copying restore script file in /usr/local/bin/ for database
+      copy:
+        src: files/cron_mysql_restore.sh
+        dest: /usr/local/bin/
+        mode: 0755
+      when: ansible_hostname == "database"
+      tags: restore
+
+    - name: Restoring MySQL for database
+      shell: "bash /usr/local/bin/cron_mysql_restore.sh"
+      when: ansible_hostname == "database"
+      tags: restore
+
+    - name: Copying backup script file in /etc/grafana/ for grafana
+      copy:
+        src: files/grafana.ini
+        dest: /etc/grafana/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: restore
+
+    - name: Rights for grafana config file
+      shell: "chown -R root:grafana /etc/grafana/grafana.ini"
+      when: ansible_hostname == "monitoring"
+      tags: restore
+
+    - name: Copying restore script file in /usr/local/bin/ for grafana
+      copy:
+        src: files/cron_grafana_restore.sh
+        dest: /usr/local/bin/
+        mode: 0755
+      when: ansible_hostname == "monitoring"
+      tags: restore
+
+    - name: Restoring SQL for grafana
+      shell: "bash /usr/local/bin/cron_grafana_restore.sh"
+      when: ansible_hostname == "monitoring"
+      tags: restore
+
+    # ------------------------------------------------------------------------------------
+
+  handlers:
+    - name: restart_sshd
+      service: name=sshd state=restarted
+    
+    - name: yum_clean_all
+      shell: yum clean all
+      args:
+        warn: false 
+      
+    - name: Restart mysql
+      service: name=mariadb state=restarted

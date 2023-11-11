@@ -1,0 +1,14 @@
+[otus:vars]
+ansible_port=22
+ansible_connection=ssh
+ansible_ssh_user=root
+ansible_ssh_pass=
+db_user=wpuser
+db_pass=
+db_name=wordpress
+
+exporter_user=mysqld_exporter
+exporter_pass=
+
+[otus]
+192.168.56.202
