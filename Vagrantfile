@@ -61,7 +61,7 @@ Vagrant.configure(2) do |config|
  end 
  config.vm.define "elk" do |elk|
  elk.vm.provider "virtualbox" do |v| 
- v.memory = 1024
+ v.memory = 2048
  v.cpus = 4
  end 
  elk.vm.network "private_network", ip: "192.168.56.205"
